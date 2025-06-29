@@ -19,6 +19,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	dutil "github.com/libp2p/go-libp2p/p2p/discovery/util"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -87,6 +89,14 @@ func main() {
 		panic(err)
 	}
 
+	routingDiscovery := drouting.NewRoutingDiscovery(dht)
+	dutil.Advertise(ctx, routingDiscovery, serviceName)
+
+	routingPeerC, err := routingDiscovery.FindPeers(ctx, serviceName)
+	if err != nil {
+		panic(err)
+	}
+
 	donec := make(chan struct{}, 1)
 	go publishLoop(ctx, topic, donec)
 
@@ -95,6 +105,12 @@ func main() {
 
 	for {
 		select {
+		case pi := <-routingPeerC:
+			if err := h.Connect(ctx, pi); err != nil {
+				log.Println(err)
+				continue
+			}
+			fmt.Println("Connected to", pi.ID)
 		case pi := <-PeerC:
 			if err := h.Connect(ctx, pi); err != nil {
 				log.Println(err)
