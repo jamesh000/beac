@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/libp2p/go-libp2p"
 	kaddht "github.com/libp2p/go-libp2p-kad-dht"
@@ -16,16 +18,20 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/routing"
+	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"github.com/multiformats/go-multiaddr"
 )
+
+const serviceName string = "/testingbeac/1.0"
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// arguments
-	port := flag.Int("l", 8000, "Port to listen on")
+	port := flag.Int("l", 0, "Port to listen on")
 	dest := flag.String("d", "", "Destination address")
+	mdnsEnabled := flag.Bool("mdns", false, "Enable MDNS")
 	flag.Parse()
 
 	// make host with Kademlia DHT routing
@@ -39,7 +45,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	topic, err := ps.Join("testTopic")
+	topic, err := ps.Join(serviceName)
 	if err != nil {
 		panic(err)
 	}
@@ -68,12 +74,40 @@ func main() {
 		fmt.Println("Connected to", targetInfo.ID)
 	}
 
+	var PeerC chan peer.AddrInfo
+	if *mdnsEnabled {
+		PeerC, err = initMdns(h, serviceName)
+		if err != nil {
+			panic(err)
+		}
+	}
+
 	err = dht.Bootstrap(ctx)
 	if err != nil {
 		panic(err)
 	}
 
-	publishLoop(ctx, topic)
+	donec := make(chan struct{}, 1)
+	go publishLoop(ctx, topic, donec)
+
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT)
+
+	for {
+		select {
+		case pi := <-PeerC:
+			if err := h.Connect(ctx, pi); err != nil {
+				log.Println(err)
+				continue
+			}
+			fmt.Println("Connected to", pi.ID)
+		case <-donec:
+			h.Close()
+			os.Exit(0)
+		case <-stop:
+			h.Close()
+		}
+	}
 }
 
 func makeRoutedHost(ctx context.Context, port int) (host.Host, *kaddht.IpfsDHT, error) {
@@ -123,7 +157,7 @@ func subHandler(ctx context.Context, sub *pubsub.Subscription) {
 	}
 }
 
-func publishLoop(ctx context.Context, topic *pubsub.Topic) {
+func publishLoop(ctx context.Context, topic *pubsub.Topic, donec chan struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		msg := scanner.Text()
@@ -132,6 +166,7 @@ func publishLoop(ctx context.Context, topic *pubsub.Topic) {
 			fmt.Println("Failed to publish message on topic", topic.String(), "due to", err)
 		}
 	}
+	donec <- struct{}{}
 }
 
 func getHostAddress(ha host.Host) string {
@@ -142,4 +177,23 @@ func getHostAddress(ha host.Host) string {
 	// by encapsulating both addresses:
 	addr := ha.Addrs()[0]
 	return addr.Encapsulate(hostAddr).String()
+}
+
+type discoveryNotifee struct {
+	PeerC chan peer.AddrInfo
+}
+
+func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
+	n.PeerC <- pi
+}
+
+func initMdns(h host.Host, service string) (chan peer.AddrInfo, error) {
+	n := &discoveryNotifee{}
+	n.PeerC = make(chan peer.AddrInfo)
+
+	ser := mdns.NewMdnsService(h, service, n)
+	if err := ser.Start(); err != nil {
+		return nil, err
+	}
+	return n.PeerC, nil
 }
