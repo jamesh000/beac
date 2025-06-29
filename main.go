@@ -97,6 +97,18 @@ func main() {
 		panic(err)
 	}
 
+	for peer := range routingPeerC {
+		if peer.ID == h.ID() {
+			continue
+		}
+		err := h.Connect(ctx, peer)
+		if err != nil {
+			log.Println(err)
+			continue
+		}
+		log.Println("Connected to peer", peer.ID)
+	}
+
 	donec := make(chan struct{}, 1)
 	go publishLoop(ctx, topic, donec)
 
@@ -105,12 +117,6 @@ func main() {
 
 	for {
 		select {
-		case pi := <-routingPeerC:
-			if err := h.Connect(ctx, pi); err != nil {
-				log.Println(err)
-				continue
-			}
-			fmt.Println("Connected to", pi.ID)
 		case pi := <-PeerC:
 			if err := h.Connect(ctx, pi); err != nil {
 				log.Println(err)
